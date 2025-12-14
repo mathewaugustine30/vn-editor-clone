@@ -21,10 +21,13 @@ const App: React.FC = () => {
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
   
   // --- Refs ---
-  const videoPlayerRef = useRef<HTMLVideoElement>(null);
-  const imagePreviewRef = useRef<HTMLImageElement>(null);
   const animationFrameRef = useRef<number>();
   const lastTimeRef = useRef<number>(0);
+  
+  // Separate refs for different track types to manage sync
+  const mainVideoRef = useRef<HTMLVideoElement>(null);
+  const pipVideoRef = useRef<HTMLVideoElement>(null);
+  const audioRef = useRef<HTMLAudioElement>(null);
 
   // --- Computed ---
   const totalDuration = project.timeline.reduce((max, clip) => 
@@ -43,12 +46,23 @@ const App: React.FC = () => {
     const asset = project.assets.find(a => a.id === assetId);
     if (!asset) return;
 
-    // Find the end of the last clip to append
-    let startOffset = 0;
-    if (project.timeline.length > 0) {
-        const lastClip = project.timeline[project.timeline.length - 1];
-        startOffset = lastClip.startOffset + lastClip.duration;
+    // Determine Track Index
+    let trackIndex = 0; // Default Main
+    if (asset.type === MediaType.TEXT) trackIndex = 2; // Text Track
+    else if (asset.type === MediaType.AUDIO) trackIndex = 3; // Audio Track
+    else if (project.timeline.some(c => c.trackIndex === 0 && c.startOffset < 5)) {
+        // Simple logic: If track 0 is busy at start, maybe put in overlay? 
+        // For now, let's keep video defaults to 0, user can move later (if we implement drag-y)
+        // Or if user explicitly wants overlay, we need UI for that.
+        // For MVP: Video/Image -> Track 0. Text -> 2. Audio -> 3.
+        // We will allow adding to Track 1 (PIP) via a context menu or just manual logic later.
+        // Let's check if track 0 is occupied at the *end* of timeline.
     }
+
+    // Find insertion point (end of specific track)
+    const trackClips = project.timeline.filter(c => c.trackIndex === trackIndex);
+    const lastClip = trackClips.length > 0 ? trackClips[trackClips.length - 1] : null;
+    const startOffset = lastClip ? lastClip.startOffset + lastClip.duration : 0;
 
     const newClip: TimelineClip = {
         id: crypto.randomUUID(),
@@ -56,7 +70,7 @@ const App: React.FC = () => {
         startOffset: startOffset,
         mediaStart: 0,
         duration: asset.duration,
-        trackIndex: 0
+        trackIndex: trackIndex
     };
 
     setProject(prev => ({
@@ -68,12 +82,7 @@ const App: React.FC = () => {
   const handleDeleteClip = (clipId: string) => {
     setProject(prev => {
         const newTimeline = prev.timeline.filter(c => c.id !== clipId);
-        // Optional: Shift subsequent clips back? For simplicity in MVP, we won't shift automatically to simulate "gap" behavior, 
-        // or we could shift. Let's not shift to allow gaps.
-        return {
-            ...prev,
-            timeline: newTimeline
-        };
+        return { ...prev, timeline: newTimeline };
     });
     if (selectedClipId === clipId) setSelectedClipId(null);
   };
@@ -88,23 +97,15 @@ const App: React.FC = () => {
   };
 
   const handleSplit = () => {
-      // MVP Split logic: If playhead is over selected clip, split it into two
       if (!selectedClipId) return;
-      
       const clipIndex = project.timeline.findIndex(c => c.id === selectedClipId);
       if (clipIndex === -1) return;
       
       const clip = project.timeline[clipIndex];
       
-      // Check if playhead is inside clip
       if (currentTime > clip.startOffset && currentTime < clip.startOffset + clip.duration) {
           const splitPointRelative = currentTime - clip.startOffset;
-          
-          const part1: TimelineClip = {
-              ...clip,
-              duration: splitPointRelative
-          };
-          
+          const part1: TimelineClip = { ...clip, duration: splitPointRelative };
           const part2: TimelineClip = {
               ...clip,
               id: crypto.randomUUID(),
@@ -118,42 +119,65 @@ const App: React.FC = () => {
               newTimeline.splice(clipIndex, 1, part1, part2);
               return { ...prev, timeline: newTimeline };
           });
-          
-          setSelectedClipId(part2.id); // Select the second part
+          setSelectedClipId(part2.id);
       }
   };
 
   // --- Playback Logic ---
 
-  // Determine what to show on screen based on currentTime
-  const activeClip = project.timeline.find(
-      clip => currentTime >= clip.startOffset && currentTime < clip.startOffset + clip.duration
-  );
-  
-  const activeAsset = activeClip ? project.assets.find(a => a.id === activeClip.assetId) : null;
+  // Get active clips for each track
+  const getActiveClip = (trackIndex: number) => {
+      return project.timeline.find(
+          clip => clip.trackIndex === trackIndex && currentTime >= clip.startOffset && currentTime < clip.startOffset + clip.duration
+      );
+  };
 
-  // Sync Video Element
+  const activeMainClip = getActiveClip(0);
+  const activePipClip = getActiveClip(1);
+  const activeTextClip = getActiveClip(2);
+  const activeAudioClip = getActiveClip(3);
+
+  const getAsset = (clip?: TimelineClip) => clip ? project.assets.find(a => a.id === clip.assetId) : null;
+
+  const mainAsset = getAsset(activeMainClip);
+  const pipAsset = getAsset(activePipClip);
+  const textAsset = getAsset(activeTextClip);
+  const audioAsset = getAsset(activeAudioClip);
+
+  // Sync Video/Audio Elements
+  const syncMediaElement = (element: HTMLMediaElement | null, clip: TimelineClip | undefined, asset: MediaAsset | undefined | null) => {
+      if (!element) return;
+      if (!clip || !asset || (asset.type !== MediaType.VIDEO && asset.type !== MediaType.AUDIO)) {
+          element.pause();
+          return; // No active media for this track
+      }
+
+      if (element.getAttribute('src') !== asset.src) {
+          element.src = asset.src;
+          element.load();
+      }
+
+      const targetTime = clip.mediaStart + (currentTime - clip.startOffset);
+      
+      // Sync tolerance
+      if (Math.abs(element.currentTime - targetTime) > 0.3) {
+          element.currentTime = targetTime;
+      }
+      
+      if (isPlaying && element.paused) {
+          element.play().catch(() => {});
+      } else if (!isPlaying && !element.paused) {
+          element.pause();
+      }
+  };
+
+  // Sync Effect
   useEffect(() => {
-    const video = videoPlayerRef.current;
-    if (!video || !activeClip || !activeAsset || activeAsset.type !== MediaType.VIDEO) return;
+     syncMediaElement(mainVideoRef.current, activeMainClip, mainAsset);
+     syncMediaElement(pipVideoRef.current, activePipClip, pipAsset);
+     syncMediaElement(audioRef.current, activeAudioClip, audioAsset);
+  }, [currentTime, isPlaying, activeMainClip, activePipClip, activeAudioClip, mainAsset, pipAsset, audioAsset]);
 
-    // If source changed
-    const currentSrc = video.getAttribute('src');
-    if (currentSrc !== activeAsset.src) {
-        video.src = activeAsset.src;
-        // Wait for metadata then seek
-        video.onloadedmetadata = () => {
-             video.currentTime = activeClip.mediaStart + (currentTime - activeClip.startOffset);
-             if (isPlaying) video.play().catch(() => {});
-        };
-    } else {
-        // Source is same, check sync drift
-        const targetMediaTime = activeClip.mediaStart + (currentTime - activeClip.startOffset);
-        if (Math.abs(video.currentTime - targetMediaTime) > 0.3) {
-            video.currentTime = targetMediaTime;
-        }
-    }
-  }, [activeClip, activeAsset, currentTime, isPlaying]);
 
   // Main Loop
   useEffect(() => {
@@ -172,39 +196,28 @@ const App: React.FC = () => {
             }
             return next;
         });
-        
         animationFrameRef.current = requestAnimationFrame(loop);
       };
-      
       animationFrameRef.current = requestAnimationFrame(loop);
     } else {
         if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
-        // Pause underlying video
-        if (videoPlayerRef.current) videoPlayerRef.current.pause();
     }
-
-    return () => {
-        if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
-    };
+    return () => { if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current); };
   }, [isPlaying, totalDuration]);
 
-  // Handle Play/Pause
   const togglePlay = () => setIsPlaying(!isPlaying);
 
   return (
     <div className="flex h-screen bg-black text-white font-sans overflow-hidden">
       
-      {/* Left Sidebar: Library */}
       <AssetLibrary 
         assets={project.assets} 
         onAddAsset={handleAddAsset}
         onAddToTimeline={handleAddToTimeline}
       />
 
-      {/* Main Content Area */}
       <div className="flex-1 flex flex-col min-w-0">
         
-        {/* Top: Header */}
         <header className="h-12 border-b border-zinc-800 flex items-center justify-between px-4 bg-zinc-900">
             <div className="flex items-center gap-2">
                 <div className="w-6 h-6 bg-gradient-to-tr from-blue-500 to-purple-600 rounded-md"></div>
@@ -215,39 +228,50 @@ const App: React.FC = () => {
             </Button>
         </header>
 
-        {/* Middle: Preview Player */}
+        {/* Preview Player */}
         <div className="flex-1 bg-black relative flex items-center justify-center overflow-hidden">
-            {/* Aspect Ratio Container (16:9) */}
-            <div className="aspect-video w-full max-h-[calc(100vh-350px)] max-w-4xl bg-zinc-900 shadow-2xl relative group">
-                {activeAsset ? (
-                    activeAsset.type === MediaType.VIDEO ? (
-                        <video 
-                            ref={videoPlayerRef}
-                            className="w-full h-full object-contain pointer-events-none"
-                            muted={false} // Enable sound for demo
-                        />
+            <div className="aspect-video w-full max-h-[calc(100vh-350px)] max-w-4xl bg-zinc-900 shadow-2xl relative group overflow-hidden">
+                
+                {/* 1. Main Track (Layer 0) */}
+                {mainAsset ? (
+                    mainAsset.type === MediaType.VIDEO ? (
+                        <video ref={mainVideoRef} className="w-full h-full object-contain" muted />
                     ) : (
-                        <img 
-                            ref={imagePreviewRef}
-                            src={activeAsset.src} 
-                            alt="preview" 
-                            className="w-full h-full object-contain animate-in fade-in duration-300" 
-                        />
+                        <img src={mainAsset.src} className="w-full h-full object-contain" alt="main" />
                     )
                 ) : (
-                    <div className="w-full h-full flex items-center justify-center text-zinc-600">
-                        <p>No Media</p>
+                    <div className="w-full h-full flex items-center justify-center text-zinc-700 bg-zinc-950">
+                        <p>No Main Media</p>
                     </div>
                 )}
-                
-                {/* Overlay Controls */}
-                <div className="absolute inset-0 flex items-center justify-center bg-black/20 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none">
-                     {/* Can add on-preview controls here */}
-                </div>
+
+                {/* 2. PIP Track (Layer 1) */}
+                {pipAsset && activePipClip && (
+                    <div className="absolute top-4 right-4 w-1/3 aspect-video border-2 border-white/20 shadow-xl bg-black rounded-lg overflow-hidden z-10">
+                         {pipAsset.type === MediaType.VIDEO ? (
+                            <video ref={pipVideoRef} className="w-full h-full object-cover" muted />
+                        ) : (
+                            <img src={pipAsset.src} className="w-full h-full object-cover" alt="pip" />
+                        )}
+                    </div>
+                )}
+
+                {/* 3. Text Track (Layer 2) */}
+                {textAsset && activeTextClip && (
+                    <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-20">
+                        <h2 className="text-4xl font-bold text-white drop-shadow-[0_2px_2px_rgba(0,0,0,0.8)] stroke-black text-center px-8">
+                            {textAsset.textContent}
+                        </h2>
+                    </div>
+                )}
+
+                {/* Hidden Audio Track */}
+                <audio ref={audioRef} className="hidden" />
+
             </div>
         </div>
 
-        {/* Middle Bar: Tools */}
+        {/* Tools */}
         <div className="h-12 bg-zinc-900 border-t border-zinc-800 flex items-center justify-center gap-4 px-4 z-10">
             <Button variant="ghost" size="icon" onClick={() => setCurrentTime(0)}>
                 <SkipBack size={18} fill="currentColor" />
@@ -286,8 +310,8 @@ const App: React.FC = () => {
             </div>
         </div>
 
-        {/* Bottom: Timeline */}
-        <div className="h-64 flex-shrink-0">
+        {/* Timeline */}
+        <div className="h-72 flex-shrink-0">
             <Timeline 
                 clips={project.timeline}
                 assets={project.assets}

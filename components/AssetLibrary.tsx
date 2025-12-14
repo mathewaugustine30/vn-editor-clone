@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { MediaAsset, MediaType } from '../types';
 import { Button } from './Button';
 import { generateAIAsset } from '../services/geminiService';
-import { Loader2, Plus, Image as ImageIcon, Video, Sparkles } from 'lucide-react';
+import { Loader2, Plus, Image as ImageIcon, Video, Sparkles, Music, Type } from 'lucide-react';
 
 interface AssetLibraryProps {
   assets: MediaAsset[];
@@ -20,25 +20,26 @@ export const AssetLibrary: React.FC<AssetLibraryProps> = ({ assets, onAddAsset, 
     if (!file) return;
 
     const url = URL.createObjectURL(file);
-    const type = file.type.startsWith('image') ? MediaType.IMAGE : MediaType.VIDEO;
+    let type = MediaType.IMAGE;
     
-    // Create a temp video element to get duration if video
-    let duration = 5; // default for image
-    
-    if (type === MediaType.VIDEO) {
-        const video = document.createElement('video');
-        video.preload = 'metadata';
-        video.onloadedmetadata = () => {
+    if (file.type.startsWith('video')) type = MediaType.VIDEO;
+    else if (file.type.startsWith('audio')) type = MediaType.AUDIO;
+    else if (file.type.startsWith('image')) type = MediaType.IMAGE;
+
+    if (type === MediaType.VIDEO || type === MediaType.AUDIO) {
+        const media = type === MediaType.VIDEO ? document.createElement('video') : document.createElement('audio');
+        media.preload = 'metadata';
+        media.onloadedmetadata = () => {
             const newAsset: MediaAsset = {
                 id: crypto.randomUUID(),
                 type,
                 src: url,
                 name: file.name,
-                duration: video.duration,
+                duration: media.duration || 10,
             };
             onAddAsset(newAsset);
         };
-        video.src = url;
+        media.src = url;
     } else {
         const newAsset: MediaAsset = {
             id: crypto.randomUUID(),
@@ -50,8 +51,22 @@ export const AssetLibrary: React.FC<AssetLibraryProps> = ({ assets, onAddAsset, 
         onAddAsset(newAsset);
     }
     
-    // Reset input
     event.target.value = '';
+  };
+
+  const handleAddText = () => {
+      const text = prompt('Enter text content:', 'Hello World');
+      if (text) {
+          const newAsset: MediaAsset = {
+              id: crypto.randomUUID(),
+              type: MediaType.TEXT,
+              src: '',
+              name: `T: ${text.slice(0, 10)}`,
+              duration: 3,
+              textContent: text
+          };
+          onAddAsset(newAsset);
+      }
   };
 
   const handleGenerateAI = async () => {
@@ -76,24 +91,41 @@ export const AssetLibrary: React.FC<AssetLibraryProps> = ({ assets, onAddAsset, 
     }
   };
 
+  const getIcon = (type: MediaType) => {
+      switch (type) {
+          case MediaType.VIDEO: return <Video size={10} />;
+          case MediaType.IMAGE: return <ImageIcon size={10} />;
+          case MediaType.AUDIO: return <Music size={10} />;
+          case MediaType.TEXT: return <Type size={10} />;
+      }
+  };
+
   return (
     <div className="w-80 bg-zinc-900 border-r border-zinc-800 flex flex-col h-full">
       <div className="p-4 border-b border-zinc-800">
         <h2 className="text-sm font-bold text-zinc-100 mb-4 uppercase tracking-wider">Media Library</h2>
         
-        <div className="grid grid-cols-2 gap-2">
-            <label className="flex flex-col items-center justify-center h-20 border border-dashed border-zinc-700 rounded-lg cursor-pointer hover:bg-zinc-800 hover:border-zinc-500 transition-all">
-                <input type="file" className="hidden" accept="video/*,image/*" onChange={handleFileUpload} />
-                <Plus className="w-5 h-5 text-zinc-400 mb-1" />
-                <span className="text-xs text-zinc-400">Import Media</span>
+        <div className="grid grid-cols-4 gap-2 mb-2">
+            <label className="flex flex-col items-center justify-center h-16 border border-dashed border-zinc-700 rounded-lg cursor-pointer hover:bg-zinc-800 hover:border-zinc-500 transition-all col-span-2">
+                <input type="file" className="hidden" accept="video/*,image/*,audio/*" onChange={handleFileUpload} />
+                <Plus className="w-4 h-4 text-zinc-400 mb-1" />
+                <span className="text-[10px] text-zinc-400">Import</span>
             </label>
 
             <button 
-                onClick={() => setShowGenModal(true)}
-                className="flex flex-col items-center justify-center h-20 border border-zinc-700 bg-gradient-to-br from-indigo-900/20 to-purple-900/20 rounded-lg cursor-pointer hover:from-indigo-900/40 hover:to-purple-900/40 border-indigo-500/30 transition-all"
+                onClick={handleAddText}
+                className="flex flex-col items-center justify-center h-16 border border-zinc-700 bg-zinc-800 rounded-lg cursor-pointer hover:bg-zinc-700 transition-all"
             >
-                <Sparkles className="w-5 h-5 text-indigo-400 mb-1" />
-                <span className="text-xs text-indigo-300">AI Gen</span>
+                <Type className="w-4 h-4 text-zinc-400 mb-1" />
+                <span className="text-[10px] text-zinc-400">Text</span>
+            </button>
+
+            <button 
+                onClick={() => setShowGenModal(true)}
+                className="flex flex-col items-center justify-center h-16 border border-zinc-700 bg-gradient-to-br from-indigo-900/20 to-purple-900/20 rounded-lg cursor-pointer hover:from-indigo-900/40 hover:to-purple-900/40 border-indigo-500/30 transition-all"
+            >
+                <Sparkles className="w-4 h-4 text-indigo-400 mb-1" />
+                <span className="text-[10px] text-indigo-300">AI</span>
             </button>
         </div>
       </div>
@@ -102,19 +134,24 @@ export const AssetLibrary: React.FC<AssetLibraryProps> = ({ assets, onAddAsset, 
       <div className="flex-1 overflow-y-auto p-4 space-y-3">
         {assets.length === 0 && (
             <div className="text-center mt-10 text-zinc-600 text-sm">
-                No media imported.
+                Import media to start.
             </div>
         )}
         {assets.map(asset => (
             <div key={asset.id} className="group relative flex items-center p-2 rounded-md bg-zinc-950/50 hover:bg-zinc-800 border border-transparent hover:border-zinc-700 transition-all">
-                <div className="w-16 h-12 bg-black rounded overflow-hidden flex-shrink-0 relative">
+                <div className="w-12 h-10 bg-black rounded overflow-hidden flex-shrink-0 relative flex items-center justify-center">
                     {asset.type === MediaType.VIDEO ? (
                          <video src={asset.src} className="w-full h-full object-cover" />
-                    ) : (
+                    ) : asset.type === MediaType.IMAGE ? (
                         <img src={asset.src} alt={asset.name} className="w-full h-full object-cover" />
+                    ) : asset.type === MediaType.AUDIO ? (
+                        <div className="w-full h-full bg-orange-900/30 flex items-center justify-center"><Music size={16} className="text-orange-400"/></div>
+                    ) : (
+                        <div className="w-full h-full bg-emerald-900/30 flex items-center justify-center"><Type size={16} className="text-emerald-400"/></div>
                     )}
+                    
                     <div className="absolute bottom-0 right-0 p-0.5 bg-black/60 rounded-tl">
-                        {asset.type === MediaType.VIDEO ? <Video size={10} /> : <ImageIcon size={10} />}
+                        {getIcon(asset.type)}
                     </div>
                 </div>
                 <div className="ml-3 flex-1 min-w-0">
