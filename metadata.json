@@ -1,0 +1,5 @@
+{
+  "name": "VN-Style Web Editor",
+  "description": "A browser-based video editor featuring a multi-clip timeline, local storage project persistence, and AI-powered asset generation using Gemini.",
+  "requestFramePermissions": []
+}
